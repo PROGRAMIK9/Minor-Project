@@ -5,7 +5,7 @@ services:
       POSTGRES_DB: pipelab
       POSTGRES_USER: pipelab
       POSTGRES_PASSWORD: pipelab
-    ports: ["5432:5432"]
+    ports: ["5433:5432"]
     volumes: ["pipelab-postgres:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pipelab -d pipelab"]

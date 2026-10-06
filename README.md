@@ -6,7 +6,7 @@ PipeLab is a browser based plumbing network editor and digital twin prototype. I
 
 - `src/domain` contains component definitions, explicit ports, graph traversal and a deterministic pressure/flow simulation. It has no Three.js dependency.
 - `src/scene` renders domain entities with React Three Fiber. The scene is a view of component IDs and connections, not the simulation source of truth.
-- `src/state` holds scene, selection, inventory and simulation state in a Zustand store. The frontend currently runs the same deterministic simulation locally for responsive prototyping.
+- `src/state` holds scene, selection, inventory and simulation state in a Zustand store. On startup it hydrates or seeds a project through FastAPI, persists mutations, and requests every simulation result from the API. The browser does not author pressure or failure outcomes.
 - `backend/app` provides FastAPI schemas, SQLAlchemy domain persistence, simulation service and a versioned project WebSocket event channel. PostgreSQL is the configured persistent store; SQLite is a development fallback when running the API directly.
 - `docker-compose.yml` runs PostgreSQL, Redis and the API. Redis is provisioned for future pub/sub fanout; single-process WebSocket broadcast is currently used.
 
@@ -27,13 +27,13 @@ Start backend and infrastructure:
 docker compose up --build
 ```
 
-API docs are at `http://localhost:8000/docs`; health is `GET /health`. To run only the backend without Docker, create a virtual environment, install `backend/requirements.txt`, then from `backend/` run `uvicorn app.main:app --reload` (uses local SQLite by default).
+API docs are at `http://localhost:8000/docs`; health is `GET /health`. PostgreSQL is exposed on host port `5433` to avoid conflicting with an existing local PostgreSQL service. To run only the backend without Docker, use Python 3.12, create a virtual environment, install `backend/requirements.txt`, then from `backend/` run `uvicorn app.main:app --reload` (uses local SQLite by default).
 
 ## First vertical slice
 
 The initial graph has a pressure tank, PVC pipe, ball valve and outlet tap joined through named ports. Select inventory to enter placement mode; click the viewport grid to place. Grid placement snaps to half-unit increments and snaps near the current run. Q/E or R rotates in quarter turns, Escape cancels, Delete removes a selected part, and arrow keys nudge selection. Select the valve to toggle it. Change source PSI and press **Simulate**. Diagnostics name the first overloaded component as root cause and list downstream taps separately. Replace component opens placement for that part type.
 
-Current milestone uses a simplified deterministic pressure loss per component and flow resistance. It is not CFD, water hammer, or a validated engineering design tool. Replace `src/domain/simulation.ts` / `backend/app/simulation.py` behind the existing graph boundary to introduce a calibrated solver.
+Current milestone uses a simplified deterministic pressure loss per component and flow resistance. It is not CFD, water hammer, or a validated engineering design tool. Replace `backend/app/simulation.py` behind the existing graph boundary to introduce a calibrated solver. `src/domain/simulation.ts` remains a pure reference implementation for unit-level domain work; the running editor uses the API response.
 
 ## API and event architecture
 
