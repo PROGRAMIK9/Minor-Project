@@ -12,7 +12,7 @@ type ApiComponent = Omit<ComponentEntity, 'maxPressure' | 'pressureLoss' | 'flow
 type ApiConnection = { id: string; from_component: string; from_port: string; to_component: string; to_port: string };
 type ApiProject = { id: string; name: string; source_pressure: number; components: ApiComponent[]; connections: ApiConnection[] };
 type ApiSimulation = { components: ApiComponent[]; diagnostic: Diagnostic; leaks?: SimulatedLeak[] };
-export type SimulatedLeak = { component_id: string; port_id: string; position: [number, number, number]; pressure: number };
+export type SimulatedLeak = { component_id: string; port_id: string; position: [number, number, number]; pressure: number; kind?: 'leak' | 'outlet' | 'break' };
 type ApiEvent = { type: string; payload?: ApiSimulation };
 
 const fromApi = (component: ApiComponent): ComponentEntity => ({

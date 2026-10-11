@@ -57,6 +57,13 @@ def run_simulation(components: list[dict], connections: list[dict], source_press
             if (component['id'], port.get('id')) not in used_ports:
                 if component['type'] == 'tap' and port.get('id') == 'outlet': continue
                 leaks.append({'component_id': component['id'], 'port_id': port.get('id'), 'position': port_world_position(component, port), 'pressure': next((c['pressure'] for c in output if c['id']==component['id']), 0), 'kind': 'leak'})
+    for component in components:
+        if component['id'] not in levels or component['type'] not in ('pipe', 'curved-pipe', 'valve'):
+            continue
+        pressure = next((c['pressure'] for c in output if c['id'] == component['id']), 0)
+        if pressure > float(component.get('max_pressure', 70)):
+            center = component.get('position', [0, 0, 0])
+            leaks.append({'component_id': component['id'], 'port_id': 'body', 'position': (center[0], center[1], center[2]), 'pressure': pressure, 'kind': 'break', 'severity': pressure / max(1,float(component.get('max_pressure',70)))})
     failed = next((c for c in output if c['status'] == 'failed'), None)
     diagnosis = {'root_cause': failed, 'secondary_effects': [c for c in output if c['type'] == 'tap' and c['id'] in levels] if failed else [], 'message': f"{failed['name']} exceeds its {failed['max_pressure']} PSI rating." if failed else f'{len(leaks)} open pressurized port(s) are leaking.' if leaks else 'All connected components are within their pressure ratings.', 'recommendation': 'Replace with a higher-rated component or reduce source pressure.' if failed else 'Connect or cap each open port.' if leaks else 'System operating within rated limits.'}
     return {'components': output, 'diagnostic': diagnosis, 'leaks': leaks}
