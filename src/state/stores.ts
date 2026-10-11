@@ -2,15 +2,16 @@ import { create } from 'zustand';
 import { catalog } from '../domain/catalog';
 import type { Diagnostic } from '../domain/simulation';
 import type { ComponentEntity, ComponentType, Connection, Vec3 } from '../domain/types';
+import { snapPlacement } from '../domain/placement';
 import { projectApi } from '../services/api';
 import type { SimulatedLeak } from '../services/api';
 const id = () => crypto.randomUUID();
 const initial: ComponentEntity[] = [
-  { id: 'tank-main', type: 'tank', name: 'Water Cylinder', position: [-4, 0.6, 0], rotation: 0, material: 'Steel', diameter: .5, length: 1, maxPressure: 200, pressureLoss: 0, flowResistance: 0, open: true, opening: 1, ports: catalog[4].ports, status: 'normal', pressure: 40, flow: 0 },
-  { id: 'pipe-main', type: 'pipe', name: 'Rising Pipe', position: [-3, 1.1, 0], rotation: 0, rotation3: [0, 0, Math.PI / 2], material: 'PVC', diameter: .25, length: 2, maxPressure: 70, pressureLoss: 2, flowResistance: 1, open: true, opening: 1, ports: catalog[0].ports, status: 'normal', pressure: 38, flow: 0 },
-  { id: 'valve-main', type: 'valve', name: 'Ball Valve', position: [-3, 2.1, 0], rotation: 0, material: 'Brass', diameter: .25, length: 1, maxPressure: 150, pressureLoss: 1, flowResistance: 2, open: true, opening: 1, ports: catalog[2].ports, status: 'normal', pressure: 37, flow: 0 },
-  { id: 'pipe-upper', type: 'pipe', name: 'Outlet Pipe', position: [-1.5, 2.1, 0], rotation: 0, material: 'PVC', diameter: .25, length: 2, maxPressure: 70, pressureLoss: 2, flowResistance: 1, open: true, opening: 1, ports: catalog[0].ports, status: 'normal', pressure: 36, flow: 0 },
-  { id: 'tap-main', type: 'tap', name: 'Outlet', position: [0, 2.1, 0], rotation: 0, material: 'Chrome', diameter: .25, length: 1, maxPressure: 120, pressureLoss: 0, flowResistance: 1, open: true, opening: 1, ports: catalog[3].ports, status: 'normal', pressure: 36, flow: 0 },
+  { id: 'tank-main', type: 'tank', name: 'Water Cylinder', position: [-4, 1.1, 0], rotation: 0, rotation3: [0, 0, 0], material: 'Steel', diameter: .5, length: 1, maxPressure: 200, pressureLoss: 0, flowResistance: 0, open: true, opening: 1, ports: [{...catalog[4].ports[0], position:[.59,.25,0]}], status: 'normal', pressure: 40, flow: 0 },
+  { id: 'pipe-main', type: 'pipe', name: 'Rising Pipe', position: [-3.41, 2.35, 0], rotation: 0, rotation3: [0, 0, Math.PI / 2], material: 'PVC', diameter: .25, length: 2, maxPressure: 70, pressureLoss: 2, flowResistance: 1, open: true, opening: 1, ports: catalog[0].ports, status: 'normal', pressure: 38, flow: 0 },
+  { id: 'valve-main', type: 'valve', name: 'Ball Valve', position: [-3.02, 3.35, 0], rotation: 0, rotation3: [0, 0, 0], material: 'Brass', diameter: .25, length: 1, maxPressure: 150, pressureLoss: 1, flowResistance: 2, open: true, opening: 1, ports: catalog[2].ports, status: 'normal', pressure: 37, flow: 0 },
+  { id: 'pipe-upper', type: 'pipe', name: 'Outlet Pipe', position: [-1.63, 3.35, 0], rotation: 0, rotation3: [0, 0, 0], material: 'PVC', diameter: .25, length: 2, maxPressure: 70, pressureLoss: 2, flowResistance: 1, open: true, opening: 1, ports: catalog[0].ports, status: 'normal', pressure: 36, flow: 0 },
+  { id: 'tap-main', type: 'tap', name: 'Outlet', position: [-.13, 3.35, 0], rotation: 0, rotation3: [0, 0, 0], material: 'Chrome', diameter: .25, length: 1, maxPressure: 120, pressureLoss: 0, flowResistance: 1, open: true, opening: 1, ports: catalog[3].ports, status: 'normal', pressure: 36, flow: 0 },
 ];
 const initialConnections: Connection[] = [
   { id: 'c1', fromComponent: 'tank-main', fromPort: 'inlet', toComponent: 'pipe-main', toPort: 'inlet' },
@@ -45,7 +46,12 @@ export const useStore = create<Store>((set, get) => ({
         const currentIds = new Set(project.components.map(c => c.id));
         const requiredIds = new Set(initial.map(c => c.id));
         const starterOnly = [...currentIds].every(componentId => requiredIds.has(componentId));
-        if (starterOnly && (project.components.find(c => c.id === 'tank-main')?.name !== 'Water Cylinder' || !project.connections.some(c => c.id === 'c4'))) {
+        const risingPort = project.components.find(c=>c.id==='pipe-main')?.ports.find(p=>p.id==='inlet')?.position;
+        const tank = project.components.find(c => c.id === 'tank-main');
+        const valve = project.components.find(c => c.id === 'valve-main');
+        const risingPipe = project.components.find(c => c.id === 'pipe-main');
+        const legacyStarterLayout = tank?.name === 'Water Cylinder' && tank.position[0] === -4 && tank.position[1] === 1.1 && valve?.position[0] === -3.41 && risingPipe?.position[1] === 2.6 && risingPort?.[0] === -1 && risingPort?.[1] === 0;
+        if (starterOnly && legacyStarterLayout) {
           await Promise.all(project.components.map(c => projectApi.deleteComponent(project.id, c.id)));
           await projectApi.seed(project.id, initial, initialConnections);
         }
@@ -65,7 +71,7 @@ export const useStore = create<Store>((set, get) => ({
             flowResistance: component.flow_resistance,
             pressure: Number(component.pressure ?? 0),
             flow: Number(component.flow ?? 0),
-            status: component.status ?? 'normal',
+            status: component.status ?? (Number(component.pressure ?? 0) > Number(component.max_pressure ?? 70) ? 'failed' : 'normal'),
           })), diagnostic: event.payload.diagnostic, leaks: event.payload.leaks ?? [], running: true });
           return;
         }
@@ -75,7 +81,7 @@ export const useStore = create<Store>((set, get) => ({
     catch (error) { syncError(set, error); }
   },
   setSelected: selected => set({ selected }), setPlacing: placing => set({ placing, selected: null, connectionMode: false }), setConnectionMode: connectionMode => set({ connectionMode, placing: null }),
-  place: (type, position, rotation) => { const def = catalog.find(c => c.type === type)!; const component: ComponentEntity = { id: id(), type, name: def.name, position, rotation, material: String(def.properties.material), diameter: Number(def.properties.diameter ?? .25), length: Number(def.properties.length ?? 1), maxPressure: Number(def.properties.maxPressure), pressureLoss: type === 'pipe' || type === 'curved-pipe' ? 2 : type === 'valve' ? 1 : 0, flowResistance: 1, open: true, opening: 1, ports: def.ports, status: 'normal', pressure: 0, flow: 0 }; set(s => ({ components: [...s.components, component], placing: null, selected: component.id })); const projectId = get().projectId; if (projectId) void projectApi.addComponent(projectId, component).catch(error => syncError(set, error)); },
+  place: (type, position, rotation) => { const def = catalog.find(c => c.type === type)!; const state = get(); const snap = snapPlacement(type, position, rotation, state.components, state.connections); const component: ComponentEntity = { id: id(), type, name: def.name, position: snap.position, rotation, material: String(def.properties.material), diameter: Number(def.properties.diameter ?? .25), length: Number(def.properties.length ?? 1), maxPressure: Number(def.properties.maxPressure), pressureLoss: type === 'pipe' || type === 'curved-pipe' ? 2 : type === 'valve' ? 1 : 0, flowResistance: 1, open: true, opening: 1, ports: def.ports, status: 'normal', pressure: 0, flow: 0 }; const connection: Connection | undefined = snap.connection ? { ...snap.connection, id: id(), toComponent: component.id } : undefined; set(s => ({ components: [...s.components, component], connections: connection ? [...s.connections, connection] : s.connections, placing: null, selected: component.id })); const projectId = get().projectId; if (projectId) void projectApi.addComponent(projectId, component).then(() => connection ? projectApi.addConnection(projectId, connection) : undefined).catch(error => syncError(set, error)); },
   move: (componentId, position) => { const component = get().components.find(c => c.id === componentId); if (!component) return; const wasRunning=get().running; const updated = { ...component, position }; set(s => ({ components: s.components.map(c => c.id === componentId ? updated : c), ...(wasRunning?{leaks:[],diagnostic:readyDiagnostic}:{}) })); if (get().projectId) void projectApi.updateComponent(get().projectId!, updated).then(()=>{if(wasRunning)void get().runSimulation();}).catch(error => syncError(set, error)); },
   rotate: (componentId, rotation) => { const component = get().components.find(c => c.id === componentId); if (!component) return; const updated = { ...component, rotation }; set(s => ({ components: s.components.map(c => c.id === componentId ? updated : c) })); if (get().projectId) void projectApi.updateComponent(get().projectId!, updated).catch(error => syncError(set, error)); },
   setRotation3: (componentId, rotation3) => { const component = get().components.find(c => c.id === componentId); if (!component) return; const updated = { ...component, rotation3 }; set(s => ({ components: s.components.map(c => c.id === componentId ? updated : c) })); if (get().projectId) void projectApi.updateComponent(get().projectId!, updated).catch(error => syncError(set, error)); },
@@ -86,6 +92,6 @@ export const useStore = create<Store>((set, get) => ({
   setPressure: pressure => { const wasRunning=get().running; set({ pressure, ...(wasRunning?{leaks:[],diagnostic:readyDiagnostic}:{}) }); if (get().projectId) void projectApi.updatePressure(get().projectId!, pressure).then(()=>{if(wasRunning)void get().runSimulation();}).catch(error => syncError(set, error)); },
   runSimulation: async () => { const projectId = get().projectId; if (!projectId) { set({ apiStatus: 'error', apiError: 'The project has not been loaded from the API.' }); return; } try { const result = await projectApi.simulate(projectId, get().pressure); set({ ...result, running: true, apiStatus: 'connected', apiError: null }); } catch (error) { syncError(set, error); } },
   stopSimulation: () => set({ running: false, leaks: [], diagnostic: readyDiagnostic }),
-  reset: async () => { const projectId = get().projectId; if (!projectId) return; try { const project = await projectApi.reset(projectId); const state = projectApi.fromProject(project); set({ ...state, leaks: [], selected: null, placing: null, running: false, diagnostic: readyDiagnostic, apiStatus: 'connected', apiError: null }); } catch (error) { syncError(set, error); } },
+  reset: async () => { const projectId = get().projectId; if (!projectId) return; try { await projectApi.reset(projectId); await projectApi.seed(projectId, initial, initialConnections); await projectApi.updatePressure(projectId, 40); const project = await projectApi.getProject(projectId); const state = projectApi.fromProject(project); set({ ...state, leaks: [], selected: null, placing: null, running: false, diagnostic: readyDiagnostic, apiStatus: 'connected', apiError: null }); } catch (error) { syncError(set, error); } },
   toggleValve: componentId => { const component = get().components.find(c => c.id === componentId); if (!component) return; const updated = { ...component, open: !component.open }; const wasRunning=get().running; set(s => ({ components: s.components.map(c => c.id === componentId ? updated : c), ...(wasRunning?{leaks:[],diagnostic:readyDiagnostic}:{}) })); if (get().projectId) void projectApi.updateComponent(get().projectId!, updated).then(()=>{if(wasRunning)void get().runSimulation();}).catch(error => syncError(set, error)); },
 }));

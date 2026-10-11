@@ -2,10 +2,10 @@ import type { ComponentDefinition, ComponentType, PortDefinition } from './types
 const ports = (type: ComponentType): PortDefinition[] => {
   const p = (id: string, x: number, z = 0): PortDefinition => ({ id, direction: 'bidirectional', position: [x, 0, z], vector: [Math.sign(x), 0, Math.sign(z)], diameter: 0.25 });
   if (type === 'curved-pipe') return [p('inlet', -.62), p('outlet', 0, -.62)];
-  if (type === 'tank') return [p('inlet', .5, 0)];
+  if (type === 'tank') return [p('inlet', .59, 1)];
   if (type === 'tap') return [p('inlet', -.5), p('outlet', .34, .23)];
   if (type === 'valve') return [p('inlet', -.39), p('outlet', .39)];
-  return [p('inlet', -0.5), p('outlet', 0.5)];
+  return [p('inlet', -1), p('outlet', 1)];
 };
 export const catalog: ComponentDefinition[] = [
   { type: 'pipe', name: 'PVC Pipe', category: 'Pipe', model: 'pipe', ports: ports('pipe'), properties: { material: 'PVC', maxPressure: 70, diameter: 0.25, length: 2, description: 'Straight hollow tube that carries water between two fittings.' } },

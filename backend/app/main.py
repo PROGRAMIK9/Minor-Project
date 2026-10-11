@@ -18,7 +18,7 @@ def db_session():
     finally: db.close()
 
 def as_component(c):
-    return {'id':c.id,'type':c.type,'name':c.name,'position':c.position,'rotation':c.rotation,'material':c.material,'diameter':c.diameter,'length':c.length,'max_pressure':c.max_pressure,'pressure_loss':c.pressure_loss,'flow_resistance':c.flow_resistance,'open':c.open,'opening':c.opening,'ports':c.ports,'properties':c.properties,'pressure':0,'flow':0,'status':'normal'}
+    return {'id':c.id,'type':c.type,'name':c.name,'position':c.position,'rotation':c.rotation,'rotation3':(c.properties or {}).get('rotation3'),'material':c.material,'diameter':c.diameter,'length':c.length,'max_pressure':c.max_pressure,'pressure_loss':c.pressure_loss,'flow_resistance':c.flow_resistance,'open':c.open,'opening':c.opening,'ports':c.ports,'properties':c.properties,'pressure':0,'flow':0,'status':'normal'}
 def as_project(p):
     return {'id':p.id,'name':p.name,'source_pressure':p.source_pressure,'components':[as_component(c) for c in p.components],'connections':[{'id':c.id,'from_component':c.from_component,'from_port':c.from_port,'to_component':c.to_component,'to_port':c.to_port} for c in p.connections]}
 async def publish(project_id: str, event: dict):
@@ -88,13 +88,20 @@ async def simulate_project(project_id: str, payload: SimulationRequest, db: Sess
     p=db.get(models.Project,project_id)
     if not p: raise HTTPException(404,'Project not found')
     result=run_simulation([as_component(c) for c in p.components],[{'from_component':c.from_component,'from_port':c.from_port,'to_component':c.to_component,'to_port':c.to_port} for c in p.connections],payload.source_pressure)
-    sim=models.Simulation(project_id=project_id,source_pressure=payload.source_pressure,result=result); db.add(sim); db.add(models.SimulationEvent(project_id=project_id,event_type='simulation_completed',payload={'pressure':payload.source_pressure,'diagnostic':result['diagnostic']})); db.commit(); await publish(project_id, {'version':1,'type':'simulation_completed','project_id':project_id,'payload':result}); return result
+    sim=models.Simulation(project_id=project_id,source_pressure=payload.source_pressure,result=result); db.add(sim); db.add(models.SimulationEvent(project_id=project_id,event_type='simulation_completed',payload={'pressure':payload.source_pressure,'diagnostic':result['diagnostic'],'leaks':result['leaks']})); db.commit(); await publish(project_id, {'version':1,'type':'simulation_completed','project_id':project_id,'payload':result}); return result
 
 @app.post('/projects/{project_id}/reset')
 async def reset_project(project_id: str, db: Session=Depends(db_session)):
     p=db.get(models.Project,project_id)
     if not p: raise HTTPException(404,'Project not found')
-    db.query(models.Simulation).filter_by(project_id=project_id).delete(); db.commit(); await publish(project_id, {'version':1,'type':'simulation_stopped','project_id':project_id,'payload':{}}); return as_project(p)
+    db.query(models.Simulation).filter_by(project_id=project_id).delete()
+    db.query(models.SimulationEvent).filter_by(project_id=project_id).delete()
+    db.query(models.Connection).filter_by(project_id=project_id).delete()
+    db.query(models.ProjectComponent).filter_by(project_id=project_id).delete()
+    p.source_pressure=40
+    db.commit(); db.refresh(p)
+    await publish(project_id, {'version':1,'type':'simulation_stopped','project_id':project_id,'payload':{}})
+    return as_project(p)
 
 @app.get('/projects/{project_id}/diagnostics')
 def diagnostics(project_id: str, db: Session=Depends(db_session)):

@@ -8,6 +8,7 @@ let socket: WebSocket | null = null;
 type ApiComponent = Omit<ComponentEntity, 'maxPressure' | 'pressureLoss' | 'flowResistance' | 'pressure' | 'flow' | 'status'> & {
   max_pressure: number; pressure_loss: number; flow_resistance: number;
   pressure?: number; flow?: number; status?: ComponentEntity['status'];
+  properties?: Record<string, unknown>;
 };
 type ApiConnection = { id: string; from_component: string; from_port: string; to_component: string; to_port: string };
 type ApiProject = { id: string; name: string; source_pressure: number; components: ApiComponent[]; connections: ApiConnection[] };
@@ -40,6 +41,7 @@ const toApiConnection = (connection: Connection) => ({
 });
 const toApi = (component: ComponentEntity) => ({
   ...component,
+  properties: { rotation3: component.rotation3 },
   max_pressure: component.maxPressure,
   pressure_loss: component.pressureLoss,
   flow_resistance: component.flowResistance,

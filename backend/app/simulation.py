@@ -26,7 +26,7 @@ def run_simulation(components: list[dict], connections: list[dict], source_press
     valid_connections = []
     for edge in connections:
         a, b = edge['from_component'], edge['to_component']
-        if a in by_id and b in by_id and connection_is_aligned(edge, by_id):
+        if a in by_id and b in by_id:
             adjacency[a].append(b); adjacency[b].append(a)
             valid_connections.append(edge)
     source = next((c['id'] for c in components if c['type'] == 'tank'), components[0]['id'] if components else None)
@@ -35,13 +35,19 @@ def run_simulation(components: list[dict], connections: list[dict], source_press
         queue = deque([source]); levels[source] = 0
         while queue:
             current = queue.popleft()
+            component = by_id[current]
+            # A closed valve or tap remains pressurized on its inlet side, but
+            # it isolates every component beyond its outlet from the source.
+            if component['type'] in ('valve', 'tap') and not component.get('open', True):
+                continue
             for neighbor in adjacency[current]:
                 if neighbor not in levels:
                     levels[neighbor] = levels[current] + 1; queue.append(neighbor)
     output = []
     for c in components:
         connected = c['id'] in levels
-        pressure = max(0.0, source_pressure - (0 if c['type'] == 'tank' else levels.get(c['id'], 0) * float(c.get('pressure_loss', 0)))) if connected else 0
+        pressure_drop_per_hop = 2.0 if c['type'] in ('pipe', 'curved-pipe') else 1.0 if c['type'] == 'valve' else 0.5
+        pressure = max(0.0, source_pressure - (0 if c['type'] == 'tank' else levels.get(c['id'], 0) * pressure_drop_per_hop)) if connected else 0
         status = 'failed' if connected and pressure > c.get('max_pressure', 70) else 'warning' if connected and pressure > c.get('max_pressure', 70) * .82 else 'normal'
         flow = pressure / max(1, float(c.get('flow_resistance', 1))) * float(c.get('opening', 1)) if connected and c.get('open', True) and c['type'] != 'tank' else 0
         output.append({**c, 'pressure': pressure, 'flow': flow, 'status': status})
@@ -49,19 +55,24 @@ def run_simulation(components: list[dict], connections: list[dict], source_press
     used_ports = {(e['from_component'], e['from_port']) for e in valid_connections} | {(e['to_component'], e['to_port']) for e in valid_connections}
     for component in components:
         if component['id'] not in levels or component['type'] not in ('pipe', 'curved-pipe', 'valve', 'tap') or not component.get('open', True): continue
-        if component['type'] == 'tap':
+        # An exposed port is only a water leak while there is pressure to drive
+        # water through it. At zero source pressure it remains a disconnected
+        # port, but must not create a leak diagnosis or a water jet.
+        component_pressure = next((c['pressure'] for c in output if c['id'] == component['id']), 0)
+        if component_pressure <= 0: continue
+        if component['type'] == 'tap' and component.get('open', True):
             outlet = next((p for p in component.get('ports', []) if p.get('id') == 'outlet'), None)
             if outlet:
-                leaks.append({'component_id': component['id'], 'port_id': outlet['id'], 'position': port_world_position(component, outlet), 'pressure': next((c['pressure'] for c in output if c['id']==component['id']), 0), 'kind': 'outlet'})
+                leaks.append({'component_id': component['id'], 'port_id': outlet['id'], 'position': port_world_position(component, outlet), 'pressure': component_pressure, 'kind': 'outlet'})
         for port in component.get('ports', []):
             if (component['id'], port.get('id')) not in used_ports:
                 if component['type'] == 'tap' and port.get('id') == 'outlet': continue
-                leaks.append({'component_id': component['id'], 'port_id': port.get('id'), 'position': port_world_position(component, port), 'pressure': next((c['pressure'] for c in output if c['id']==component['id']), 0), 'kind': 'leak'})
+                leaks.append({'component_id': component['id'], 'port_id': port.get('id'), 'position': port_world_position(component, port), 'pressure': component_pressure, 'kind': 'leak'})
     for component in components:
         if component['id'] not in levels or component['type'] not in ('pipe', 'curved-pipe', 'valve'):
             continue
         pressure = next((c['pressure'] for c in output if c['id'] == component['id']), 0)
-        if pressure > float(component.get('max_pressure', 70)):
+        if pressure > 0 and pressure >= float(component.get('max_pressure', 70)):
             center = component.get('position', [0, 0, 0])
             leaks.append({'component_id': component['id'], 'port_id': 'body', 'position': (center[0], center[1], center[2]), 'pressure': pressure, 'kind': 'break', 'severity': pressure / max(1,float(component.get('max_pressure',70)))})
     failed = next((c for c in output if c['status'] == 'failed'), None)
