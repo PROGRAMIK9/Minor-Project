@@ -77,11 +77,17 @@ async def add_connection(project_id: str, payload: dict, db: Session=Depends(db_
     if not db.get(models.Project,project_id): raise HTTPException(404,'Project not found')
     c=models.Connection(project_id=project_id, **payload); db.add(c); db.commit(); await publish(project_id, {'version':1,'type':'connection_created','project_id':project_id,'payload':payload}); return {'id':c.id,**payload}
 
+@app.delete('/projects/{project_id}/connections/{connection_id}')
+async def delete_connection(project_id: str, connection_id: str, db: Session=Depends(db_session)):
+    c=db.query(models.Connection).filter_by(project_id=project_id,id=connection_id).first()
+    if not c: raise HTTPException(404,'Connection not found')
+    db.delete(c); db.commit(); await publish(project_id, {'version':1,'type':'connection_removed','project_id':project_id,'payload':{'connection_id':connection_id}}); return {'ok':True}
+
 @app.post('/projects/{project_id}/simulate')
 async def simulate_project(project_id: str, payload: SimulationRequest, db: Session=Depends(db_session)):
     p=db.get(models.Project,project_id)
     if not p: raise HTTPException(404,'Project not found')
-    result=run_simulation([as_component(c) for c in p.components],[{'from_component':c.from_component,'to_component':c.to_component} for c in p.connections],payload.source_pressure)
+    result=run_simulation([as_component(c) for c in p.components],[{'from_component':c.from_component,'from_port':c.from_port,'to_component':c.to_component,'to_port':c.to_port} for c in p.connections],payload.source_pressure)
     sim=models.Simulation(project_id=project_id,source_pressure=payload.source_pressure,result=result); db.add(sim); db.add(models.SimulationEvent(project_id=project_id,event_type='simulation_completed',payload={'pressure':payload.source_pressure,'diagnostic':result['diagnostic']})); db.commit(); await publish(project_id, {'version':1,'type':'simulation_completed','project_id':project_id,'payload':result}); return result
 
 @app.post('/projects/{project_id}/reset')

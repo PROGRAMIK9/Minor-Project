@@ -11,7 +11,8 @@ type ApiComponent = Omit<ComponentEntity, 'maxPressure' | 'pressureLoss' | 'flow
 };
 type ApiConnection = { id: string; from_component: string; from_port: string; to_component: string; to_port: string };
 type ApiProject = { id: string; name: string; source_pressure: number; components: ApiComponent[]; connections: ApiConnection[] };
-type ApiSimulation = { components: ApiComponent[]; diagnostic: Diagnostic };
+type ApiSimulation = { components: ApiComponent[]; diagnostic: Diagnostic; leaks?: SimulatedLeak[] };
+export type SimulatedLeak = { component_id: string; port_id: string; position: [number, number, number]; pressure: number };
 type ApiEvent = { type: string; payload?: ApiSimulation };
 
 const fromApi = (component: ApiComponent): ComponentEntity => ({
@@ -63,12 +64,13 @@ export const projectApi = {
   },
   async simulate(projectId: string, pressure: number) {
     const result = await request<ApiSimulation>(`/projects/${projectId}/simulate`, { method: 'POST', body: JSON.stringify({ source_pressure: pressure }) });
-    return { components: result.components.map(fromApi), diagnostic: result.diagnostic };
+    return { components: result.components.map(fromApi), diagnostic: result.diagnostic, leaks: result.leaks ?? [] };
   },
   async reset(projectId: string) { return request<ApiProject>(`/projects/${projectId}/reset`, { method: 'POST' }); },
   async updatePressure(projectId: string, pressure: number) { return request(`/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ source_pressure: pressure }) }); },
   async addComponent(projectId: string, component: ComponentEntity) { return request(`/projects/${projectId}/components`, { method: 'POST', body: JSON.stringify(toApi(component)) }); },
   async addConnection(projectId: string, connection: Connection) { return request(`/projects/${projectId}/connections`, { method: 'POST', body: JSON.stringify(toApiConnection(connection)) }); },
+  async deleteConnection(projectId: string, connectionId: string) { return request(`/projects/${projectId}/connections/${connectionId}`, { method: 'DELETE' }); },
   async updateComponent(projectId: string, component: ComponentEntity) { return request(`/projects/${projectId}/components/${component.id}`, { method: 'PUT', body: JSON.stringify(toApi(component)) }); },
   async deleteComponent(projectId: string, componentId: string) { return request(`/projects/${projectId}/components/${componentId}`, { method: 'DELETE' }); },
   subscribe(projectId: string, onEvent: (event: ApiEvent) => void, onError: () => void) {
