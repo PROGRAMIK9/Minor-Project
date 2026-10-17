@@ -48,9 +48,14 @@ def run_simulation(components: list[dict], connections: list[dict], source_press
         connected = c['id'] in levels
         pressure_drop_per_hop = 2.0 if c['type'] in ('pipe', 'curved-pipe') else 1.0 if c['type'] == 'valve' else 0.5
         pressure = max(0.0, source_pressure - (0 if c['type'] == 'tank' else levels.get(c['id'], 0) * pressure_drop_per_hop)) if connected else 0
-        status = 'failed' if connected and pressure > c.get('max_pressure', 70) else 'warning' if connected and pressure > c.get('max_pressure', 70) * .82 else 'normal'
+        fluid_factor = {'Fresh water': 1.0, 'Hard water': .72, 'Salt water': .42, 'Waste water': .55}.get(c.get('fluid', 'Fresh water'), .8)
+        age_days = max(0, float(c.get('ageDays', 0)))
+        pressure_ratio = pressure / max(1, float(c.get('max_pressure', 70)))
+        health = max(0, min(100, 100 - age_days / 36.5 / fluid_factor - max(0, pressure_ratio - .55) * 38 / fluid_factor))
+        life_days = max(0, round((health / 100) * 3650 * fluid_factor / max(1, pressure_ratio * 1.25)))
+        status = 'failed' if connected and (pressure > c.get('max_pressure', 70) or health < 12) else 'warning' if connected and (pressure > c.get('max_pressure', 70) * .82 or health < 35) else 'normal'
         flow = pressure / max(1, float(c.get('flow_resistance', 1))) * float(c.get('opening', 1)) if connected and c.get('open', True) and c['type'] != 'tank' else 0
-        output.append({**c, 'pressure': pressure, 'flow': flow, 'status': status})
+        output.append({**c, 'pressure': pressure, 'flow': flow, 'status': status, 'health': round(health, 1), 'lifeDays': life_days})
     leaks = []
     used_ports = {(e['from_component'], e['from_port']) for e in valid_connections} | {(e['to_component'], e['to_port']) for e in valid_connections}
     for component in components:
@@ -76,5 +81,6 @@ def run_simulation(components: list[dict], connections: list[dict], source_press
             center = component.get('position', [0, 0, 0])
             leaks.append({'component_id': component['id'], 'port_id': 'body', 'position': (center[0], center[1], center[2]), 'pressure': pressure, 'kind': 'break', 'severity': pressure / max(1,float(component.get('max_pressure',70)))})
     failed = next((c for c in output if c['status'] == 'failed'), None)
-    diagnosis = {'root_cause': failed, 'secondary_effects': [c for c in output if c['type'] == 'tap' and c['id'] in levels] if failed else [], 'message': f"{failed['name']} exceeds its {failed['max_pressure']} PSI rating." if failed else f'{len(leaks)} open pressurized port(s) are leaking.' if leaks else 'All connected components are within their pressure ratings.', 'recommendation': 'Replace with a higher-rated component or reduce source pressure.' if failed else 'Connect or cap each open port.' if leaks else 'System operating within rated limits.'}
+    weak = next((c for c in output if c.get('health', 100) < 35), None)
+    diagnosis = {'root_cause': failed or weak, 'secondary_effects': [c for c in output if c['type'] == 'tap' and c['id'] in levels] if (failed or weak) else [], 'message': f"{failed['name']} exceeds its safe operating limit." if failed else f"{weak['name']} has only {weak['health']}% health remaining." if weak else f'{len(leaks)} open pressurized port(s) are leaking.' if leaks else 'All connected components are within their pressure ratings.', 'recommendation': 'Replace with a higher-rated component and reduce source pressure.' if failed else f"Schedule replacement within {weak['lifeDays']} days; {weak.get('fluid','water')} is accelerating wear." if weak else 'Connect or cap each open port.' if leaks else 'System operating within rated limits.'}
     return {'components': output, 'diagnostic': diagnosis, 'leaks': leaks}

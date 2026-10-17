@@ -18,7 +18,8 @@ def db_session():
     finally: db.close()
 
 def as_component(c):
-    return {'id':c.id,'type':c.type,'name':c.name,'position':c.position,'rotation':c.rotation,'rotation3':(c.properties or {}).get('rotation3'),'material':c.material,'diameter':c.diameter,'length':c.length,'max_pressure':c.max_pressure,'pressure_loss':c.pressure_loss,'flow_resistance':c.flow_resistance,'open':c.open,'opening':c.opening,'ports':c.ports,'properties':c.properties,'pressure':0,'flow':0,'status':'normal'}
+    properties=c.properties or {}
+    return {'id':c.id,'type':c.type,'name':c.name,'position':c.position,'rotation':c.rotation,'rotation3':properties.get('rotation3'),'material':c.material,'diameter':c.diameter,'length':c.length,'max_pressure':c.max_pressure,'pressure_loss':c.pressure_loss,'flow_resistance':c.flow_resistance,'open':c.open,'opening':c.opening,'ports':c.ports,'properties':properties,'fluid':properties.get('fluid','Fresh water'),'ageDays':properties.get('ageDays',0),'pressure':0,'flow':0,'status':'normal'}
 def as_project(p):
     return {'id':p.id,'name':p.name,'source_pressure':p.source_pressure,'components':[as_component(c) for c in p.components],'connections':[{'id':c.id,'from_component':c.from_component,'from_port':c.from_port,'to_component':c.to_component,'to_port':c.to_port} for c in p.connections]}
 async def publish(project_id: str, event: dict):

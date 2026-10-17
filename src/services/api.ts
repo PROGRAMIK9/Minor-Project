@@ -24,6 +24,7 @@ const fromApi = (component: ApiComponent): ComponentEntity => ({
   pressure: Number(component.pressure ?? 0),
   flow: Number(component.flow ?? 0),
   status: component.status ?? 'normal',
+  ...(component.properties ?? {}),
 });
 const fromApiConnection = (connection: ApiConnection): Connection => ({
   id: connection.id,
@@ -41,7 +42,7 @@ const toApiConnection = (connection: Connection) => ({
 });
 const toApi = (component: ComponentEntity) => ({
   ...component,
-  properties: { rotation3: component.rotation3 },
+  properties: { rotation3: component.rotation3, fluid: component.fluid, ageDays: component.ageDays, health: component.health, lifeDays: component.lifeDays, customAssetId: component.customAssetId },
   max_pressure: component.maxPressure,
   pressure_loss: component.pressureLoss,
   flow_resistance: component.flowResistance,

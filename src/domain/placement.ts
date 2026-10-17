@@ -8,7 +8,7 @@ export type PlacementSnap = { position: Vec3; connection?: Omit<Connection, 'id'
 export function snapPlacement(
   type: ComponentType,
   position: Vec3,
-  rotation: number,
+  rotation: number | [number, number, number],
   components: ComponentEntity[],
   connections: Connection[],
 ): PlacementSnap {
@@ -20,7 +20,7 @@ export function snapPlacement(
     used.add(`${connection.fromComponent}:${connection.fromPort}`);
     used.add(`${connection.toComponent}:${connection.toPort}`);
   }
-  const rotationEuler = new THREE.Euler(0, rotation, 0);
+  const rotationEuler = new THREE.Euler(...(Array.isArray(rotation) ? rotation : [0, rotation, 0]));
   const origin = new THREE.Vector3(...position);
   const candidates = components.flatMap(component => component.ports
     .filter(port => !used.has(`${component.id}:${port.id}`))
