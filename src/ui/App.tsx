@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
-  ArrowDownToLine,
+  Box,
   ChevronDown,
   CircleHelp,
   Cloud,
@@ -16,10 +16,8 @@ import {
   Play,
   Plus,
   RotateCw,
-  Search,
   Settings2,
   Trash2,
-  Wifi,
   Wrench,
   Zap,
 } from "lucide-react";
@@ -27,6 +25,7 @@ import NetworkScene from "../scene/NetworkScene";
 import { catalog } from "../domain/catalog";
 import { useStore } from "../state/stores";
 import type { ComponentType } from "../domain/types";
+import { listStoredAssets } from "../services/assetStorage";
 
 const icons: Record<ComponentType, string> = {
   pipe: "━",
@@ -58,6 +57,7 @@ export default function App() {
     setAgeDays = useStore((s) => s.setAgeDays),
     align = useStore((s) => s.align),
     customAssets = useStore((s) => s.customAssets),
+    activeCustom = useStore((s) => s.activeCustom),
     addCustomAsset = useStore((s) => s.addCustomAsset),
     selectCustomAsset = useStore((s) => s.selectCustomAsset),
     setConnectionMode = useStore((s) => s.setConnectionMode),
@@ -71,18 +71,22 @@ export default function App() {
   );
   const [filter, setFilter] = useState("");
   const [notice, setNotice] = useState("");
-  const [activeSlot, setActiveSlot] = useState<number | null>(null);
   const [moveAxis, setMoveAxis] = useState<"free" | "x" | "y" | "z">("free");
   const [rotateAxis, setRotateAxis] = useState<"x" | "y" | "z">("z");
   const [customOpen, setCustomOpen] = useState(false);
-  const [customName, setCustomName] = useState("Inline filter");
+  const [customName, setCustomName] = useState("");
+  const [customDescription, setCustomDescription] = useState("");
   const [customMaterial, setCustomMaterial] = useState("Steel");
   const [customPressure, setCustomPressure] = useState(100);
+  const [customAgeDays, setCustomAgeDays] = useState(0);
+  const [customFile, setCustomFile] = useState<File | null>(null);
   const selected = components.find((c) => c.id === selectedId);
   const turn = (direction: number) => {
     const index = rotateAxis === "x" ? 0 : rotateAxis === "y" ? 1 : 2;
     if (placing) {
-      const r: [number, number, number] = [...useStore.getState().placementRotation3];
+      const r: [number, number, number] = [
+        ...useStore.getState().placementRotation3,
+      ];
       r[index] += direction * Math.PI / 2;
       useStore.getState().setPlacementRotation3(r);
     } else if (selected) {
@@ -103,7 +107,25 @@ export default function App() {
   );
   useEffect(() => {
     void initialize();
+    void listStoredAssets().then((assets) =>
+      useStore.getState().setCustomAssets(assets)
+    ).catch(() => {});
   }, [initialize]);
+  const readModel = async (file: File) => {
+    const format = file.name.split(".").pop()?.toLowerCase();
+    if (format !== "glb" && format !== "obj" && format !== "fbx") {
+      throw new Error("Choose a GLB, OBJ, or FBX model file.");
+    }
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => typeof reader.result === "string"
+        ? resolve(reader.result)
+        : reject(new Error("Could not read model file"));
+      reader.onerror = () => reject(reader.error ?? new Error("Could not read model file"));
+      reader.readAsDataURL(file);
+    });
+    return { format, dataUrl, fileName: file.name };
+  };
   const launchSimulation = async () => {
     if (running) {
       stop();
@@ -160,131 +182,22 @@ export default function App() {
         </div>
       </header>
       <div className="workspace">
-        <aside className="inventory panel">
-          <div className="panel-heading">
-            <div>
-              <span className="eyebrow">COMPONENT LIBRARY</span>
-              <h2>
-                Inventory{" "}
-                <span className="count">
-                  {catalog.length.toString().padStart(2, "0")}
-                </span>
-              </h2>
-            </div>
-            <button className="subtle-icon">
-              <MoreHorizontal size={18} />
-            </button>
+        <aside className="tool-rail panel">
+          <span className="eyebrow">WORKFLOW</span>
+          <div className="mode-tabs">
+            <button className={tab === "build" ? "active" : ""} onClick={() => setTab("build")}><Grid2X2 size={16} /> Build</button>
+            <button className={tab === "simulate" ? "active" : ""} onClick={() => setTab("simulate")}><Activity size={16} /> Simulate</button>
+            <button className={tab === "diagnose" ? "active" : ""} onClick={() => setTab("diagnose")}><AlertTriangle size={16} /> Diagnose{diagnostic.rootCause && <i className="tab-alert" />}</button>
+            <button className={tab === "repair" ? "active" : ""} onClick={() => setTab("repair")}><Wrench size={16} /> Repair</button>
           </div>
-          <div className="search-box">
-            <Search size={15} />
-            <input
-              placeholder="Find a component..."
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            />
-            <kbd>⌘ K</kbd>
+          <div className="rail-pressure">
+            <label><Gauge size={15} /> Source pressure <b>{pressure} PSI</b></label>
+            <input aria-label="Source pressure PSI" type="range" min="0" max="200" step="5" value={pressure} onChange={(e) => setPressure(Number(e.target.value))} />
+            <div className="rail-pressure-stepper"><button onClick={() => setPressure(Math.max(0, pressure - 5))}>−</button><input aria-label="Source pressure value" type="number" min="0" max="200" value={pressure} onChange={(e) => setPressure(Number(e.target.value))} /><button onClick={() => setPressure(Math.min(200, pressure + 5))}>+</button></div>
           </div>
-          <div className="inventory-caption">
-            <span>COMPONENTS</span>
-            <button className="filter-btn">
-              <Grid2X2 size={13} /> All types <ChevronDown size={12} />
-            </button>
-          </div>
-          <div className="inventory-label">QUICK BAR · 5 SLOTS</div>
-          <div className="hotbar">
-            {[0, 1, 2, 3, 4].map((slot) => {
-              const item = groups[slot];
-              return (
-                <button
-                  key={slot}
-                  className={`hotbar-slot ${
-                    activeSlot === slot ? "equipped" : ""
-                  } ${item && placing === item.type ? "active" : ""}`}
-                  title={item?.name ?? "Empty slot"}
-                  onClick={() => {
-                    setActiveSlot(slot);
-                    if (item) setPlacing(item.type);
-                  }}
-                >
-                  {item
-                    ? (
-                      <>
-                        <span className={`slot-model ${item.type}`}>
-                          {item.type === "pipe"
-                            ? "━━"
-                            : item.type === "curved-pipe"
-                            ? "╰"
-                            : item.type === "valve"
-                            ? "◉"
-                            : item.type === "tank"
-                            ? "▣"
-                            : "⌁"}
-                        </span>
-                        <small>{item.name}</small>
-                        <i className="slot-tooltip">
-                          {String(item.properties.description ?? "")}
-                        </i>
-                      </>
-                    )
-                    : <span className="slot-number">{slot + 1}</span>}
-                  <b>{slot + 1}</b>
-                </button>
-              );
-            })}
-          </div>
-          <div className="inventory-caption">
-            <span>PARTS</span>
-            <button className="filter-btn">
-              <Grid2X2 size={13} /> All types <ChevronDown size={12} />
-            </button>
-          </div>
-          <div className="component-list">
-            {groups.map((c) => (
-              <button
-                key={c.type}
-                onClick={() => setPlacing(c.type)}
-                className={`component-card ${
-                  placing === c.type ? "active" : ""
-                }`}
-              >
-                <span className={`component-glyph ${c.type}`}>
-                  {icons[c.type]}
-                </span>
-                <span className="component-copy">
-                  <strong>{c.name}</strong>
-                  <small>
-                    {c.category} <i />{" "}
-                    {c.type === "pipe" || c.type === "curved-pipe"
-                      ? "DN 25"
-                      : c.type === "tank"
-                      ? "200 L"
-                      : "DN 25"}
-                  </small>
-                  <em>{String(c.properties.description ?? "")}</em>
-                </span>
-                <span className="item-add">
-                  <Plus size={15} />
-                </span>
-              </button>
-            ))}
-          </div>
-          <div className="inventory-bottom">
-            <div className="library-link">
-              <Layers3 size={15} />
-              <span>Asset library</span>
-              <span className="soon">SOON</span>
-            </div>
-            <button
-              className="import-button"
-              onClick={() => setCustomOpen(true)}
-            >
-              <ArrowDownToLine size={14} /> Add custom object
-            </button>
-            {customAssets.map((asset) => (
-              <button className="custom-asset" key={asset.id} onClick={() => selectCustomAsset(asset)}>
-                ◇ {asset.name}
-              </button>
-            ))}
+          <div className="rail-actions">
+            <button className="reset-button" title="Restore the original starter components" onClick={reset}>RESET INITIAL</button>
+            <button className="run-button" onClick={launchSimulation}>{running ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}{running ? "STOP SIMULATION" : "START SIMULATION"}</button>
           </div>
         </aside>
         <section className="viewport">
@@ -318,13 +231,50 @@ export default function App() {
                   </button>
                 ))}
               </div>
-              <div className="rotate-tools" title="Choose an axis, then turn by 90 degrees">
+              <div
+                className="rotate-tools"
+                title="Choose an axis, then turn by 90 degrees"
+              >
                 <span>ROTATE</span>
-                {(["x", "y", "z"] as const).map((axis) => <button key={axis} className={rotateAxis === axis ? "selected" : ""} aria-label={`Rotate around ${axis.toUpperCase()} axis`} onClick={() => { setRotateAxis(axis); document.body.dataset.rotateAxis = axis; }}>{axis.toUpperCase()}</button>)}
-                <button className="turn-button" aria-label="Rotate 90 degrees counterclockwise" disabled={!placing && !selected} onClick={() => turn(-1)}>−90°</button>
-                <button className="turn-button" aria-label="Rotate 90 degrees clockwise" disabled={!placing && !selected} onClick={() => turn(1)}><RotateCw size={12}/> +90°</button>
+                {(["x", "y", "z"] as const).map((axis) => (
+                  <button
+                    key={axis}
+                    className={rotateAxis === axis ? "selected" : ""}
+                    aria-label={`Rotate around ${axis.toUpperCase()} axis`}
+                    onClick={() => {
+                      setRotateAxis(axis);
+                      document.body.dataset.rotateAxis = axis;
+                    }}
+                  >
+                    {axis.toUpperCase()}
+                  </button>
+                ))}
+                <button
+                  className="turn-button"
+                  aria-label="Rotate 90 degrees counterclockwise"
+                  disabled={!placing && !selected}
+                  onClick={() => turn(-1)}
+                >
+                  −90°
+                </button>
+                <button
+                  className="turn-button"
+                  aria-label="Rotate 90 degrees clockwise"
+                  disabled={!placing && !selected}
+                  onClick={() => turn(1)}
+                >
+                  <RotateCw size={12} /> +90°
+                </button>
               </div>
-              <button className="view-btn" title="Snap each connected pair together" onClick={() => { align(); setNotice("Connected ports aligned"); setTimeout(() => setNotice(""), 1600); }}>
+              <button
+                className="view-btn"
+                title="Snap each connected pair together"
+                onClick={() => {
+                  align();
+                  setNotice("Connected ports aligned");
+                  setTimeout(() => setNotice(""), 1600);
+                }}
+              >
                 <Layers3 size={14} /> Align
               </button>
               <button
@@ -419,6 +369,9 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+                {selected.customAssetId && customAssets.find((asset) => asset.id === selected.customAssetId)?.description && (
+                  <p className="inspector-description">{customAssets.find((asset) => asset.id === selected.customAssetId)?.description}</p>
+                )}
                 <div className="property-section">
                   <div className="section-label">
                     LIVE STATUS{" "}
@@ -438,17 +391,45 @@ export default function App() {
                       {selected.flow.toFixed(1)} <small>L/MIN</small>
                     </b>
                   </div>
-                  <div className="metric-row"><span>Health</span><b>{Math.round(selected.health ?? 100)} <small>%</small></b></div>
-                  <div className="metric-row"><span>Estimated service life</span><b>{selected.lifeDays === undefined ? "Run simulation" : `${selected.lifeDays} days`}</b></div>
+                  <div className="metric-row">
+                    <span>Health</span>
+                    <b>
+                      {Math.round(selected.health ?? 100)} <small>%</small>
+                    </b>
+                  </div>
+                  <div className="metric-row">
+                    <span>Estimated service life</span>
+                    <b>
+                      {selected.lifeDays === undefined
+                        ? "Run simulation"
+                        : `${selected.lifeDays} days`}
+                    </b>
+                  </div>
                 </div>
                 <div className="property-section">
                   <div className="section-label">CONFIGURATION</div>
                   <label className="field-label">Flowing fluid</label>
-                  <select className="field-value material-select" aria-label="Flowing fluid" value={selected.fluid ?? "Fresh water"} onChange={(e) => setFluid(selected.id, e.target.value)}>
-                    <option>Fresh water</option><option>Hard water</option><option>Salt water</option><option>Waste water</option>
+                  <select
+                    className="field-value material-select"
+                    aria-label="Flowing fluid"
+                    value={selected.fluid ?? "Fresh water"}
+                    onChange={(e) => setFluid(selected.id, e.target.value)}
+                  >
+                    <option>Fresh water</option>
+                    <option>Hard water</option>
+                    <option>Salt water</option>
+                    <option>Waste water</option>
                   </select>
                   <label className="field-label">Service age · DAYS</label>
-                  <input className="field-value number-field" aria-label="Service age days" type="number" min="0" value={selected.ageDays ?? 0} onChange={(e) => setAgeDays(selected.id, Number(e.target.value))} />
+                  <input
+                    className="field-value number-field"
+                    aria-label="Service age days"
+                    type="number"
+                    min="0"
+                    value={selected.ageDays ?? 0}
+                    onChange={(e) =>
+                      setAgeDays(selected.id, Number(e.target.value))}
+                  />
                   <label className="field-label">Material</label>
                   <select
                     className="field-value material-select"
@@ -592,6 +573,18 @@ export default function App() {
             )}
         </aside>
       </div>
+      <section className="inventory-dock">
+        <div className="dock-heading">
+          <div><span className="eyebrow">COMPONENT LIBRARY</span><strong>Inventory <small>{catalog.filter((item) => item.type !== "custom").length + customAssets.length}</small></strong></div>
+          <label className="dock-search"><input aria-label="Search inventory" placeholder="Filter slots" value={filter} onChange={(e) => setFilter(e.target.value)} /></label>
+          <button className="create-object-button" onClick={() => { setCustomName(""); setCustomDescription(""); setCustomAgeDays(0); setCustomFile(null); setCustomOpen(true); }}><Plus size={14} /> New object</button>
+        </div>
+        <div className="inventory-slots">
+          {groups.map((c, i) => <button key={c.type} className={`hotbar-slot ${placing === c.type ? "active" : ""}`} onClick={() => setPlacing(c.type)} title={`${c.name} — ${String(c.properties.description ?? "")}`}><b>{i + 1}</b><span className={`slot-model ${c.type}`}>{icons[c.type]}</span><small>{c.name}</small></button>)}
+          {customAssets.filter((asset) => asset.name.toLowerCase().includes(filter.toLowerCase())).map((asset, i) => <button key={asset.id} className={`hotbar-slot custom-slot ${placing === "custom" && activeCustom?.id === asset.id ? "active" : ""}`} onClick={() => selectCustomAsset(asset)} title={`${asset.name} — ${asset.description}`}><b>{groups.length + i + 1}</b><span className="slot-model"><Box size={19} /></span><small>{asset.name}</small></button>)}
+          <span className="dock-hint">Select a slot, then click the scene to place</span>
+        </div>
+      </section>
       <section className="control-bar">
         <div className="mode-tabs">
           <button
@@ -655,7 +648,13 @@ export default function App() {
           />
         </div>
         <div className="run-actions">
-          <button className="reset-button" title="Restore the original starter components" onClick={reset}>RESET INITIAL</button>
+          <button
+            className="reset-button"
+            title="Restore the original starter components"
+            onClick={reset}
+          >
+            RESET INITIAL
+          </button>
           <button className="run-button" onClick={launchSimulation}>
             {running
               ? <Pause size={14} fill="currentColor" />
@@ -738,7 +737,107 @@ export default function App() {
             )}
         </section>
       )}
-      {customOpen && <div className="custom-modal"><form className="custom-dialog" onSubmit={(e) => { e.preventDefault(); const asset={name:customName.trim() || "Custom object",material:customMaterial,maxPressure:customPressure,description:"User-defined inline object"}; addCustomAsset(asset); selectCustomAsset({ ...asset, id: crypto.randomUUID() }); setCustomOpen(false); setNotice("Custom object added to the library — click the grid to place it"); setTimeout(() => setNotice(""), 2600); }}><div><span className="eyebrow">CUSTOM OBJECT</span><h2>Create a placeable part</h2></div><label>Name<input value={customName} onChange={(e)=>setCustomName(e.target.value)} autoFocus/></label><label>Material<select value={customMaterial} onChange={(e)=>setCustomMaterial(e.target.value)}><option>Steel</option><option>PVC</option><option>Brass</option></select></label><label>Pressure rating · PSI<input type="number" min="1" value={customPressure} onChange={(e)=>setCustomPressure(Number(e.target.value))}/></label><div className="modal-actions"><button type="button" onClick={()=>setCustomOpen(false)}>Cancel</button><button type="submit">Add to library</button></div></form></div>}
+      {customOpen && (
+        <div className="custom-modal">
+          <form
+            className="custom-dialog"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (!customName.trim()) {
+                setNotice("Give your object a name first.");
+                return;
+              }
+              try {
+                const model = customFile ? await readModel(customFile) : undefined;
+                const asset = {
+                name: customName.trim(),
+                material: customMaterial,
+                maxPressure: customPressure,
+                ageDays: customAgeDays,
+                description: customDescription.trim() || "User-defined inline object",
+                ...(customFile && model ? { fileName: model.fileName, format: model.format as "glb" | "obj" | "fbx", dataUrl: model.dataUrl } : {}),
+              };
+                await addCustomAsset(asset);
+                const savedAssets = useStore.getState().customAssets;
+                const created = savedAssets[savedAssets.length - 1];
+                if (created) selectCustomAsset(created);
+                setCustomOpen(false);
+                setNotice(
+                  "Object saved to your inventory — click the scene to place it",
+                );
+                setTimeout(() => setNotice(""), 2600);
+              } catch (error) {
+                setNotice(error instanceof Error
+                  ? error.message
+                  : "Could not save this object in the browser asset library.");
+              }
+            }}
+          >
+            <div>
+              <span className="eyebrow">CUSTOM OBJECT</span>
+                  <h2>Create a placeable object</h2>
+            </div>
+            <label>
+              Name<input
+                value={customName}
+                onChange={(e) => setCustomName(e.target.value)}
+                autoFocus
+              />
+            </label>
+            <label>
+              Description<textarea
+                value={customDescription}
+                onChange={(e) => setCustomDescription(e.target.value)}
+                placeholder="What does this part do?"
+                rows={3}
+              />
+            </label>
+            <label>
+              3D model (optional)<input
+                type="file"
+                accept=".glb,.obj,.fbx,model/gltf-binary,application/octet-stream,text/plain"
+                onChange={(e) => setCustomFile(e.currentTarget.files?.[0] ?? null)}
+              />
+              <small className="model-file-hint">GLB, OBJ, or FBX. Leave empty to use a simple placeholder shape.</small>
+            </label>
+            <div className="custom-form-pair">
+            <label>
+              Service age · DAYS<input
+                type="number"
+                min="0"
+                value={customAgeDays}
+                onChange={(e) => setCustomAgeDays(Number(e.target.value))}
+              />
+            </label>
+            <label>
+              Pressure rating · PSI<input
+                type="number"
+                min="1"
+                value={customPressure}
+                onChange={(e) => setCustomPressure(Number(e.target.value))}
+              />
+            </label>
+            </div>
+            <label>
+              Material<select
+                value={customMaterial}
+                onChange={(e) => setCustomMaterial(e.target.value)}
+              >
+                <option>Steel</option>
+                <option>PVC</option>
+                <option>Brass</option>
+              </select>
+            </label>
+            <div className="health-preview"><Activity size={14} /> Initial health <b>100%</b><span>Updates as the system simulates wear.</span></div>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setCustomOpen(false)}>
+                Cancel
+              </button>
+              <button type="submit">Save object</button>
+            </div>
+          </form>
+        </div>
+      )}
       {notice && <div className="toast">{notice}</div>}
     </main>
   );
