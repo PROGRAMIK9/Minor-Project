@@ -1,11 +1,11 @@
 import { create } from "zustand";
 import { catalog } from "../domain/catalog";
-import type { Diagnostic } from "../domain/simulation";
 import type {
   ComponentEntity,
   ComponentType,
   Connection,
   CustomAsset,
+  Diagnostic,
   Vec3,
 } from "../domain/types";
 import { snapPlacement } from "../domain/placement";
@@ -30,7 +30,7 @@ const initial: ComponentEntity[] = [
     flowResistance: 0,
     open: true,
     opening: 1,
-    ports: [{ ...catalog[4].ports[0], position: [.59, .25, 0] }],
+    ports: catalog[4].ports,
     status: "normal",
     pressure: 40,
     flow: 0,
@@ -146,12 +146,18 @@ const initialConnections: Connection[] = [
     toPort: "inlet",
   },
 ];
+export type Axis = "x" | "y" | "z";
+export type MoveAxis = "free" | Axis;
 type Store = {
   components: ComponentEntity[];
   connections: Connection[];
   selected: string | null;
   placing: ComponentType | null;
   placementRotation3: Vec3;
+  moveAxis: MoveAxis;
+  rotateAxis: Axis;
+  setMoveAxis: (axis: MoveAxis) => void;
+  setRotateAxis: (axis: Axis) => void;
   pressure: number;
   running: boolean;
   diagnostic: Diagnostic;
@@ -159,6 +165,7 @@ type Store = {
   projectId: string | null;
   apiStatus: "connecting" | "connected" | "error";
   apiError: string | null;
+  pendingSaves: number;
   customAssets: CustomAsset[];
   activeCustom: CustomAsset | null;
   initialize: () => Promise<void>;
@@ -175,7 +182,9 @@ type Store = {
     rotation3?: Vec3,
   ) => void;
   move: (id: string, position: Vec3) => void;
-  rotate: (id: string, rotation: number) => void;
+  /** Updates position locally only; call commitMove to persist (used while dragging). */
+  moveLocal: (id: string, position: Vec3) => void;
+  commitMove: (id: string) => void;
   setRotation3: (id: string, rotation: Vec3) => void;
   setMaterial: (id: string, material: string) => void;
   setFluid: (id: string, fluid: string) => void;
@@ -187,7 +196,6 @@ type Store = {
   connectionMode: boolean;
   remove: (id: string) => void;
   setPressure: (p: number) => void;
-  refreshSimulation: () => Promise<void>;
   runSimulation: () => Promise<void>;
   stopSimulation: () => void;
   reset: () => Promise<void>;
@@ -199,19 +207,252 @@ const readyDiagnostic: Diagnostic = {
   message: "Ready to simulate.",
   recommendation: "",
 };
-const syncError = (set: (partial: Partial<Store>) => void, error: unknown) =>
+const syncError = (set: (partial: Partial<Store>) => void, error: unknown) => {
+  // Let the next initialize() (the Retry button) reload the project from the API.
+  initializing = null;
   set({
     apiStatus: "error",
     apiError: error instanceof Error
       ? error.message
       : "Unable to reach PipeLab API",
   });
+};
+type SetStore = (
+  partial: Partial<Store> | ((state: Store) => Partial<Store>),
+) => void;
+// Components with writes in flight from this client. Server echoes of those
+// writes are ignored so they cannot roll back a newer local edit.
+const pendingWrites = new Map<string, number>();
+/** Runs an API write, tracking it for the save indicator. Resolves to whether it succeeded. */
+async function persist(
+  set: SetStore,
+  work: () => Promise<unknown>,
+  componentIds: string[] = [],
+): Promise<boolean> {
+  componentIds.forEach((id) => pendingWrites.set(id, (pendingWrites.get(id) ?? 0) + 1));
+  set((s) => ({ pendingSaves: s.pendingSaves + 1 }));
+  try {
+    await work();
+    return true;
+  } catch (error) {
+    syncError(set, error);
+    return false;
+  } finally {
+    componentIds.forEach((id) => {
+      const remaining = (pendingWrites.get(id) ?? 1) - 1;
+      if (remaining > 0) pendingWrites.set(id, remaining);
+      else pendingWrites.delete(id);
+    });
+    set((s) => ({ pendingSaves: s.pendingSaves - 1 }));
+  }
+}
+// StrictMode runs effects twice in development; share one initialization.
+let initializing: Promise<void> | null = null;
+const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Runs `run` once `key` has been quiet for `ms`, so typing, sliders and key repeats send one request. */
+function debounce(key: string, ms: number, run: () => void) {
+  clearTimeout(saveTimers.get(key));
+  saveTimers.delete(key);
+  if (ms <= 0) return run();
+  saveTimers.set(key, setTimeout(() => {
+    saveTimers.delete(key);
+    run();
+  }, ms));
+}
+const hasPendingWrite = (componentId: string) =>
+  pendingWrites.has(componentId) || saveTimers.has(`component:${componentId}`);
+const patchComponent = (
+  set: SetStore,
+  componentId: string,
+  patch: Partial<ComponentEntity>,
+) =>
+  set((s) => ({
+    components: s.components.map((c) =>
+      c.id === componentId ? { ...c, ...patch } : c
+    ),
+  }));
+/** Results that no longer match the geometry; cleared until the re-run arrives. */
+const staleResults = (get: () => Store): Partial<Store> =>
+  get().running ? { leaks: [], diagnostic: readyDiagnostic } : {};
+/** Saves a component's latest local state, then re-runs a running simulation. */
+function saveComponent(
+  set: SetStore,
+  get: () => Store,
+  componentId: string,
+  delay = 0,
+) {
+  debounce(`component:${componentId}`, delay, () => {
+    const { projectId, components } = get();
+    const component = components.find((c) => c.id === componentId);
+    if (!projectId || !component) return;
+    void persist(
+      set,
+      () => projectApi.updateComponent(projectId, component),
+      [componentId],
+    ).then((saved) => {
+      if (saved && get().running) void get().runSimulation();
+    });
+  });
+}
+async function initializeProject(set: SetStore) {
+  const project = await projectApi.getOrCreateProject();
+  if (!project.components.length) {
+    await projectApi.seed(project.id, initial, initialConnections);
+  } else if (
+    project.components.length === 4 && project.components.some((c) =>
+      c.id === "tank-main"
+    ) && project.components.some((c) => c.id === "pipe-main") &&
+    project.components.some((c) => c.id === "valve-main") &&
+    project.components.some((c) => c.id === "tap-main")
+  ) {
+    const starterIds = new Set([
+      "tank-main",
+      "pipe-main",
+      "valve-main",
+      "tap-main",
+    ]);
+    await Promise.all(
+      project.components.filter((c) => starterIds.has(c.id)).map((c) =>
+        projectApi.deleteComponent(project.id, c.id)
+      ),
+    );
+    await projectApi.seed(project.id, initial, initialConnections);
+  } else if (
+    project.components.length === 5 && project.components.some((c) =>
+      c.id === "tank-main"
+    ) && !project.components.some((c) => c.id === "pipe-upper") &&
+    project.components.some((c) => c.id === "valve-main")
+  ) {
+    const obsoleteIds = new Set([
+      "tank-main",
+      "pipe-main",
+      "valve-main",
+      "tap-main",
+    ]);
+    await Promise.all(
+      project.components.filter((c) => obsoleteIds.has(c.id)).map((c) =>
+        projectApi.deleteComponent(project.id, c.id)
+      ),
+    );
+    await projectApi.seed(project.id, initial, initialConnections);
+  } else if (
+    project.components.length === 5 && project.components.some((c) =>
+      c.id === "pipe-upper"
+    ) && project.components.some((c) => c.id === "tank-main") &&
+    project.components.some((c) => c.id === "valve-main")
+  ) {
+    const currentIds = new Set(project.components.map((c) => c.id));
+    const requiredIds = new Set(initial.map((c) => c.id));
+    const starterOnly = [...currentIds].every((componentId) =>
+      requiredIds.has(componentId)
+    );
+    const risingPort = project.components.find((c) => c.id === "pipe-main")
+      ?.ports.find((p) => p.id === "inlet")?.position;
+    const tank = project.components.find((c) => c.id === "tank-main");
+    const valve = project.components.find((c) => c.id === "valve-main");
+    const risingPipe = project.components.find((c) => c.id === "pipe-main");
+    const legacyStarterLayout = tank?.name === "Water Cylinder" &&
+      tank.position[0] === -4 && tank.position[1] === 1.1 &&
+      valve?.position[0] === -3.41 && risingPipe?.position[1] === 2.6 &&
+      risingPort?.[0] === -1 && risingPort?.[1] === 0;
+    if (starterOnly && legacyStarterLayout) {
+      await Promise.all(
+        project.components.map((c) =>
+          projectApi.deleteComponent(project.id, c.id)
+        ),
+      );
+      await projectApi.seed(project.id, initial, initialConnections);
+    }
+  }
+  const hydrated = await projectApi.getProject(project.id);
+  set({
+    ...projectApi.fromProject(hydrated),
+    projectId: hydrated.id,
+    apiStatus: "connected",
+    apiError: null,
+  });
+  // Apply each event to local state instead of re-fetching the whole project,
+  // which would discard simulation results and race with in-progress edits.
+  projectApi.subscribe(
+    project.id,
+    (event) => {
+      switch (event.type) {
+        case "simulation_completed":
+          set(projectApi.fromSimulation(event.payload));
+          return;
+        case "component_added":
+        case "component_updated": {
+          if (hasPendingWrite(event.payload.id)) return;
+          const incoming = projectApi.fromComponent(event.payload);
+          set((s) => {
+            const local = s.components.find((c) => c.id === incoming.id);
+            if (!local) return { components: [...s.components, incoming] };
+            // Keep the latest simulated values; the event only carries stored fields.
+            const { pressure, flow, status, health, lifeDays } = local;
+            const merged = { ...incoming, pressure, flow, status, health, lifeDays };
+            return {
+              components: s.components.map((c) => c.id === incoming.id ? merged : c),
+            };
+          });
+          return;
+        }
+        case "component_removed": {
+          const removed = event.payload.component_id;
+          set((s) => ({
+            components: s.components.filter((c) => c.id !== removed),
+            connections: s.connections.filter((c) =>
+              c.fromComponent !== removed && c.toComponent !== removed
+            ),
+            selected: s.selected === removed ? null : s.selected,
+          }));
+          return;
+        }
+        case "connection_created": {
+          const connection = projectApi.fromConnection(event.payload);
+          set((s) =>
+            s.connections.some((c) => c.id === connection.id)
+              ? {}
+              : { connections: [...s.connections, connection] }
+          );
+          return;
+        }
+        case "connection_removed":
+          set((s) => ({
+            connections: s.connections.filter((c) =>
+              c.id !== event.payload.connection_id
+            ),
+          }));
+          return;
+        case "project_reset":
+          set({
+            ...projectApi.fromProject(event.payload),
+            selected: null,
+            running: false,
+            leaks: [],
+            diagnostic: readyDiagnostic,
+          });
+          return;
+      }
+    },
+    () => {
+      initializing = null;
+      set({
+        apiStatus: "error",
+        apiError: "Lost the live connection to the PipeLab API.",
+      });
+    },
+  );
+}
 export const useStore = create<Store>((set, get) => ({
   components: initial,
   connections: initialConnections,
   selected: null,
   placing: null,
   placementRotation3: [0, 0, 0],
+  moveAxis: "free",
+  rotateAxis: "z",
+  setMoveAxis: (moveAxis) => set({ moveAxis }),
+  setRotateAxis: (rotateAxis) => set({ rotateAxis }),
   pressure: 40,
   running: false,
   diagnostic: readyDiagnostic,
@@ -219,136 +460,15 @@ export const useStore = create<Store>((set, get) => ({
   projectId: null,
   apiStatus: "connecting",
   apiError: null,
+  pendingSaves: 0,
   connectionMode: false,
   customAssets: [],
   activeCustom: null,
-  initialize: async () => {
-    try {
-      const project = await projectApi.getOrCreateProject();
-      if (!project.components.length) {
-        await projectApi.seed(project.id, initial, initialConnections);
-      } else if (
-        project.components.length === 4 && project.components.some((c) =>
-          c.id === "tank-main"
-        ) && project.components.some((c) => c.id === "pipe-main") &&
-        project.components.some((c) => c.id === "valve-main") &&
-        project.components.some((c) => c.id === "tap-main")
-      ) {
-        const starterIds = new Set([
-          "tank-main",
-          "pipe-main",
-          "valve-main",
-          "tap-main",
-        ]);
-        await Promise.all(
-          project.components.filter((c) => starterIds.has(c.id)).map((c) =>
-            projectApi.deleteComponent(project.id, c.id)
-          ),
-        );
-        await projectApi.seed(project.id, initial, initialConnections);
-      } else if (
-        project.components.length === 5 && project.components.some((c) =>
-          c.id === "tank-main"
-        ) && !project.components.some((c) => c.id === "pipe-upper") &&
-        project.components.some((c) => c.id === "valve-main")
-      ) {
-        const obsoleteIds = new Set([
-          "tank-main",
-          "pipe-main",
-          "valve-main",
-          "tap-main",
-        ]);
-        await Promise.all(
-          project.components.filter((c) => obsoleteIds.has(c.id)).map((c) =>
-            projectApi.deleteComponent(project.id, c.id)
-          ),
-        );
-        await projectApi.seed(project.id, initial, initialConnections);
-      } else if (
-        project.components.length === 5 && project.components.some((c) =>
-          c.id === "pipe-upper"
-        ) && project.components.some((c) => c.id === "tank-main") &&
-        project.components.some((c) => c.id === "valve-main")
-      ) {
-        const currentIds = new Set(project.components.map((c) => c.id));
-        const requiredIds = new Set(initial.map((c) => c.id));
-        const starterOnly = [...currentIds].every((componentId) =>
-          requiredIds.has(componentId)
-        );
-        const risingPort = project.components.find((c) => c.id === "pipe-main")
-          ?.ports.find((p) => p.id === "inlet")?.position;
-        const tank = project.components.find((c) => c.id === "tank-main");
-        const valve = project.components.find((c) => c.id === "valve-main");
-        const risingPipe = project.components.find((c) => c.id === "pipe-main");
-        const legacyStarterLayout = tank?.name === "Water Cylinder" &&
-          tank.position[0] === -4 && tank.position[1] === 1.1 &&
-          valve?.position[0] === -3.41 && risingPipe?.position[1] === 2.6 &&
-          risingPort?.[0] === -1 && risingPort?.[1] === 0;
-        if (starterOnly && legacyStarterLayout) {
-          await Promise.all(
-            project.components.map((c) =>
-              projectApi.deleteComponent(project.id, c.id)
-            ),
-          );
-          await projectApi.seed(project.id, initial, initialConnections);
-        }
-      }
-      const hydrated = await projectApi.getProject(project.id);
-      const applyProject = async () => {
-        try {
-          const current = await projectApi.getProject(project.id);
-          set({
-            ...projectApi.fromProject(current),
-            projectId: current.id,
-            apiStatus: "connected",
-            apiError: null,
-          });
-        } catch (error) {
-          syncError(set, error);
-        }
-      };
-      set({
-        ...projectApi.fromProject(hydrated),
-        projectId: hydrated.id,
-        apiStatus: "connected",
-        apiError: null,
-      });
-      projectApi.subscribe(
-        project.id,
-        (event) => {
-          if (event.type === "simulation_completed" && event.payload) {
-            set({
-              components: event.payload.components.map((component) => ({
-                ...component,
-                maxPressure: component.max_pressure,
-                pressureLoss: component.pressure_loss,
-                flowResistance: component.flow_resistance,
-                pressure: Number(component.pressure ?? 0),
-                flow: Number(component.flow ?? 0),
-                status: component.status ??
-                  (Number(component.pressure ?? 0) >
-                      Number(component.max_pressure ?? 70)
-                    ? "failed"
-                    : "normal"),
-                ...(component.properties ?? {}),
-              })),
-              diagnostic: event.payload.diagnostic,
-              leaks: event.payload.leaks ?? [],
-              running: get().running,
-            });
-            return;
-          }
-          void applyProject();
-        },
-        () =>
-          set({
-            apiStatus: "error",
-            apiError: "The project event socket disconnected.",
-          }),
-      );
-    } catch (error) {
-      syncError(set, error);
-    }
+  initialize: () => {
+    initializing ??= initializeProject(set).catch((error) =>
+      syncError(set, error)
+    );
+    return initializing;
   },
   setSelected: (selected) => set({ selected }),
   setPlacing: (placing) =>
@@ -416,94 +536,39 @@ export const useStore = create<Store>((set, get) => ({
     }));
     const projectId = get().projectId;
     if (projectId) {
-      void projectApi.addComponent(projectId, component).then(() =>
-        connection ? projectApi.addConnection(projectId, connection) : undefined
-      ).catch((error) => syncError(set, error));
+      void persist(set, async () => {
+        await projectApi.addComponent(projectId, component);
+        if (connection) await projectApi.addConnection(projectId, connection);
+      }, [component.id]);
     }
   },
   move: (componentId, position) => {
-    const component = get().components.find((c) => c.id === componentId);
-    if (!component) return;
-    const wasRunning = get().running;
-    const updated = { ...component, position };
-    set((s) => ({
-      components: s.components.map((c) => c.id === componentId ? updated : c),
-      ...(wasRunning ? { leaks: [], diagnostic: readyDiagnostic } : {}),
-    }));
-    if (get().projectId) {
-      void projectApi.updateComponent(get().projectId!, updated).then(() => {
-        if (wasRunning) {
-          void get().runSimulation();
-        }
-      }).catch((error) => syncError(set, error));
-    }
+    patchComponent(set, componentId, { position });
+    set(staleResults(get));
+    saveComponent(set, get, componentId, 250);
   },
-  rotate: (componentId, rotation) => {
-    const component = get().components.find((c) => c.id === componentId);
-    if (!component) return;
-    const updated = { ...component, rotation };
-    set((s) => ({
-      components: s.components.map((c) => c.id === componentId ? updated : c),
-    }));
-    if (get().projectId) {
-      void projectApi.updateComponent(get().projectId!, updated).catch(
-        (error) => syncError(set, error),
-      );
-    }
+  moveLocal: (componentId, position) =>
+    patchComponent(set, componentId, { position }),
+  commitMove: (componentId) => {
+    set(staleResults(get));
+    saveComponent(set, get, componentId);
   },
   setRotation3: (componentId, rotation3) => {
-    const component = get().components.find((c) => c.id === componentId);
-    if (!component) return;
-    const updated = { ...component, rotation3 };
-    set((s) => ({
-      components: s.components.map((c) => c.id === componentId ? updated : c),
-    }));
-    if (get().projectId) {
-      void projectApi.updateComponent(get().projectId!, updated).catch(
-        (error) => syncError(set, error),
-      );
-    }
+    patchComponent(set, componentId, { rotation3 });
+    set(staleResults(get));
+    saveComponent(set, get, componentId, 250);
   },
   setMaterial: (componentId, material) => {
-    const component = get().components.find((c) => c.id === componentId);
-    if (!component) return;
-    const updated = { ...component, material };
-    set((s) => ({
-      components: s.components.map((c) => c.id === componentId ? updated : c),
-    }));
-    if (get().projectId) {
-      void projectApi.updateComponent(get().projectId!, updated).catch(
-        (error) => syncError(set, error),
-      );
-    }
+    patchComponent(set, componentId, { material });
+    saveComponent(set, get, componentId);
   },
   setFluid: (componentId, fluid) => {
-    const component = get().components.find((c) => c.id === componentId);
-    if (!component) return;
-    const updated = { ...component, fluid };
-    set((s) => ({
-      components: s.components.map((c) => c.id === componentId ? updated : c),
-    }));
-    const projectId = get().projectId;
-    if (projectId) {
-      void projectApi.updateComponent(projectId, updated).then(() =>
-        get().refreshSimulation()
-      ).catch((error) => syncError(set, error));
-    }
+    patchComponent(set, componentId, { fluid });
+    saveComponent(set, get, componentId);
   },
   setAgeDays: (componentId, ageDays) => {
-    const component = get().components.find((c) => c.id === componentId);
-    if (!component) return;
-    const updated = { ...component, ageDays };
-    set((s) => ({
-      components: s.components.map((c) => c.id === componentId ? updated : c),
-    }));
-    const projectId = get().projectId;
-    if (projectId) {
-      void projectApi.updateComponent(projectId, updated).then(() =>
-        get().refreshSimulation()
-      ).catch((error) => syncError(set, error));
-    }
+    patchComponent(set, componentId, { ageDays });
+    saveComponent(set, get, componentId, 300);
   },
   align: () => {
     const state = get();
@@ -561,10 +626,14 @@ export const useStore = create<Store>((set, get) => ({
       });
     }
     set({ components: next });
-    if (state.projectId) {
-      void Promise.all(
-        next.map((c) => projectApi.updateComponent(state.projectId!, c)),
-      ).catch((error) => syncError(set, error));
+    const projectId = state.projectId;
+    if (projectId) {
+      void persist(
+        set,
+        () =>
+          Promise.all(next.map((c) => projectApi.updateComponent(projectId, c))),
+        next.map((c) => c.id),
+      );
     }
   },
   connect: (a, b) => {
@@ -590,10 +659,9 @@ export const useStore = create<Store>((set, get) => ({
       connections: [...s.connections, connection],
       connectionMode: false,
     }));
-    if (state.projectId) {
-      void projectApi.addConnection(state.projectId, connection).catch(
-        (error) => syncError(set, error),
-      );
+    const projectId = state.projectId;
+    if (projectId) {
+      void persist(set, () => projectApi.addConnection(projectId, connection));
     }
   },
   disconnect: (a, b) => {
@@ -606,9 +674,11 @@ export const useStore = create<Store>((set, get) => ({
     set((s) => ({
       connections: s.connections.filter((c) => c.id !== connection.id),
     }));
-    if (state.projectId) {
-      void projectApi.deleteConnection(state.projectId, connection.id).catch(
-        (error) => syncError(set, error),
+    const projectId = state.projectId;
+    if (projectId) {
+      void persist(
+        set,
+        () => projectApi.deleteConnection(projectId, connection.id),
       );
     }
   },
@@ -620,40 +690,27 @@ export const useStore = create<Store>((set, get) => ({
       ),
       selected: null,
     }));
-    if (get().projectId) {
-      void projectApi.deleteComponent(get().projectId!, componentId).catch(
-        (error) => syncError(set, error),
+    const projectId = get().projectId;
+    if (projectId) {
+      void persist(
+        set,
+        () => projectApi.deleteComponent(projectId, componentId),
+        [componentId],
       );
     }
   },
   setPressure: (pressure) => {
-    const wasRunning = get().running;
-    set({
-      pressure,
-      ...(wasRunning ? { leaks: [], diagnostic: readyDiagnostic } : {}),
-    });
-    if (get().projectId) {
-      void projectApi.updatePressure(get().projectId!, pressure).then(() => {
-        if (wasRunning) {
-          void get().runSimulation();
-        }
-      }).catch((error) => syncError(set, error));
-    }
-  },
-  refreshSimulation: async () => {
-    const projectId = get().projectId;
-    if (!projectId) return;
-    try {
-      const result = await projectApi.simulate(projectId, get().pressure);
-      set({
-        ...result,
-        running: get().running,
-        apiStatus: "connected",
-        apiError: null,
+    set({ pressure, ...staleResults(get) });
+    debounce("pressure", 250, () => {
+      const projectId = get().projectId;
+      if (!projectId) return;
+      void persist(
+        set,
+        () => projectApi.updatePressure(projectId, get().pressure),
+      ).then((saved) => {
+        if (saved && get().running) void get().runSimulation();
       });
-    } catch (error) {
-      syncError(set, error);
-    }
+    });
   },
   runSimulation: async () => {
     const projectId = get().projectId;
@@ -671,19 +728,31 @@ export const useStore = create<Store>((set, get) => ({
       syncError(set, error);
     }
   },
+  // Live readings stop with the simulation; health estimates are kept.
   stopSimulation: () =>
-    set({ running: false, leaks: [], diagnostic: readyDiagnostic }),
+    set((s) => ({
+      running: false,
+      leaks: [],
+      diagnostic: readyDiagnostic,
+      components: s.components.map((c) => ({
+        ...c,
+        pressure: 0,
+        flow: 0,
+        status: "normal",
+      })),
+    })),
   reset: async () => {
     const projectId = get().projectId;
     if (!projectId) return;
     try {
-      await projectApi.reset(projectId);
-      await projectApi.seed(projectId, initial, initialConnections);
-      await projectApi.updatePressure(projectId, 40);
-      const project = await projectApi.getProject(projectId);
-      const state = projectApi.fromProject(project);
+      const project = await projectApi.reset(
+        projectId,
+        initial,
+        initialConnections,
+        40,
+      );
       set({
-        ...state,
+        ...projectApi.fromProject(project),
         leaks: [],
         selected: null,
         placing: null,
@@ -699,18 +768,8 @@ export const useStore = create<Store>((set, get) => ({
   toggleValve: (componentId) => {
     const component = get().components.find((c) => c.id === componentId);
     if (!component) return;
-    const updated = { ...component, open: !component.open };
-    const wasRunning = get().running;
-    set((s) => ({
-      components: s.components.map((c) => c.id === componentId ? updated : c),
-      ...(wasRunning ? { leaks: [], diagnostic: readyDiagnostic } : {}),
-    }));
-    if (get().projectId) {
-      void projectApi.updateComponent(get().projectId!, updated).then(() => {
-        if (wasRunning) {
-          void get().runSimulation();
-        }
-      }).catch((error) => syncError(set, error));
-    }
+    patchComponent(set, componentId, { open: !component.open });
+    set(staleResults(get));
+    saveComponent(set, get, componentId);
   },
 }));
